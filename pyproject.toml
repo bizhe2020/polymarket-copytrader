@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-copytrader"
+version = "0.1.0"
+description = "Copy-trading prototype for following a Polymarket trader at second-level latency."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Codex" }]
+dependencies = []
+
+[project.optional-dependencies]
+realtime = ["websocket-client>=1.8.0"]
+trading = ["py-clob-client>=0.25.0"]
+
+[project.scripts]
+poly-copy = "polymarket_copytrader.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["polymarket_copytrader*"]

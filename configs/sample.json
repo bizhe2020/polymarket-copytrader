@@ -1,0 +1,35 @@
+{
+  "target": {
+    "profile": "@guh123",
+    "wallet": null
+  },
+  "runtime": {
+    "poll_interval_seconds": 1.0,
+    "request_timeout_seconds": 10.0,
+    "activity_limit": 100,
+    "lookback_seconds_on_start": 900,
+    "requery_overlap_seconds": 5,
+    "state_path": "var/state.json",
+    "event_log_path": "var/events.jsonl"
+  },
+  "strategy": {
+    "follow_fraction": 0.5,
+    "fixed_order_usdc": 5.0,
+    "min_target_usdc_size": 5.0,
+    "max_follow_price": 0.92,
+    "max_slippage_bps": 150,
+    "max_position_per_asset_usdc": 25.0,
+    "min_order_usdc": 5.0,
+    "skip_outcomes": [],
+    "skip_market_slugs": [],
+    "execution_policy": "IOC"
+  },
+  "execution": {
+    "mode": "paper",
+    "host": "https://clob.polymarket.com",
+    "chain_id": 137,
+    "signature_type": 1,
+    "private_key_env": "POLY_PRIVATE_KEY",
+    "funder_env": "POLY_FUNDER"
+  }
+}

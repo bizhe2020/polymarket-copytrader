@@ -1,0 +1,91 @@
+{
+  "targets": [
+    {
+      "name": "guh123",
+      "profile": "@guh123",
+      "wallet": "0xa45fe11dd1420fca906ceac2c067844379a42429",
+      "weight": 0.5
+    },
+    {
+      "name": "blue-walnut",
+      "profile": "https://polymarket.com/zh/@blue-walnut?tab=activity",
+      "wallet": "0x4b188496d1b3da1716165380999afb9b314c725f",
+      "weight": 0.5
+    }
+  ],
+  "runtime": {
+    "request_timeout_seconds": 60.0,
+    "cache_dir": "var/eval_two_accounts_10k/cache"
+  },
+  "portfolio": {
+    "initial_capital_usdc": 10000.0,
+    "standalone_initial_capital_usdc": 10000.0
+  },
+  "data": {
+    "recent_days": 90,
+    "activity_page_size": 500,
+    "price_fidelity_minutes": 1,
+    "max_trades_per_target": 10000
+  },
+  "strategy": {
+    "follow_fraction": 1.0,
+    "max_order_usdc": 50.0,
+    "min_target_usdc_size": 0.5,
+    "min_order_usdc": 0.5,
+    "max_position_per_asset_usdc": 750.0,
+    "allow_sell": false,
+    "exit_mode": "redeem"
+  },
+  "scenarios": [
+    {
+      "name": "target_reference",
+      "observation_delay_seconds": 0,
+      "extra_slippage_bps": 0.0,
+      "execution_policy": "FOK",
+      "synthetic_levels": 8,
+      "synthetic_depth_multiplier": 8.0,
+      "use_target_trade_price": true
+    },
+    {
+      "name": "copy_reference_0m",
+      "observation_delay_seconds": 5,
+      "extra_slippage_bps": 0.0,
+      "execution_policy": "FOK",
+      "synthetic_levels": 6,
+      "synthetic_depth_multiplier": 2.5,
+      "use_target_trade_price": false
+    },
+    {
+      "name": "cn_vpn_base",
+      "observation_delay_seconds": 45,
+      "extra_slippage_bps": 35.0,
+      "execution_policy": "IOC",
+      "synthetic_levels": 6,
+      "synthetic_depth_multiplier": 1.5,
+      "use_target_trade_price": false
+    },
+    {
+      "name": "cn_vpn_conservative",
+      "observation_delay_seconds": 120,
+      "extra_slippage_bps": 80.0,
+      "execution_policy": "IOC",
+      "synthetic_levels": 5,
+      "synthetic_depth_multiplier": 1.0,
+      "use_target_trade_price": false
+    },
+    {
+      "name": "overseas_base",
+      "observation_delay_seconds": 8,
+      "extra_slippage_bps": 10.0,
+      "execution_policy": "FOK",
+      "synthetic_levels": 6,
+      "synthetic_depth_multiplier": 2.0,
+      "use_target_trade_price": false
+    }
+  ],
+  "output": {
+    "summary_path": "var/eval_two_accounts_10k/summary.json",
+    "curve_path": "var/eval_two_accounts_10k/equity_curve.csv",
+    "fills_path": "var/eval_two_accounts_10k/fills.jsonl"
+  }
+}

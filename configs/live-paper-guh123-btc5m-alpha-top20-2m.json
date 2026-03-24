@@ -1,0 +1,60 @@
+{
+  "targets": [
+    {
+      "name": "guh123",
+      "profile": "@guh123",
+      "wallet": "0xa45fe11dd1420fca906ceac2c067844379a42429",
+      "weight": 1.0
+    }
+  ],
+  "runtime": {
+    "poll_interval_seconds": 2.0,
+    "request_timeout_seconds": 20.0,
+    "activity_limit": 150,
+    "lookback_seconds_on_start": 20,
+    "requery_overlap_seconds": 5,
+    "market_websocket_enabled": true,
+    "market_websocket_warmup_ms": 350,
+    "require_real_order_book": true,
+    "duration_hours": 0.0334,
+    "heartbeat_interval_seconds": 30.0,
+    "state_path": "var/live_paper_guh123_btc5m_alpha_top20_2m/state.json",
+    "event_log_path": "var/live_paper_guh123_btc5m_alpha_top20_2m/events.jsonl",
+    "hourly_stats_path": "var/live_paper_guh123_btc5m_alpha_top20_2m/hourly_stats.csv"
+  },
+  "portfolio": {
+    "initial_capital_usdc": 10000.0
+  },
+  "strategy": {
+    "follow_fraction": 1.0,
+    "fixed_order_usdc": 100.0,
+    "min_target_usdc_size": 0.5,
+    "max_follow_price": 0.995,
+    "max_slippage_bps": 250,
+    "max_position_per_asset_usdc": 100.0,
+    "min_order_usdc": 1.0,
+    "skip_outcomes": [],
+    "skip_market_slugs": [],
+    "execution_policy": "IOC",
+    "aggressive_price_enabled": true,
+    "aggressive_price_max_ticks": 1,
+    "max_trade_age_seconds": 90,
+    "short_market_max_trade_age_seconds": 18
+  },
+  "execution": {
+    "host": "https://clob.polymarket.com",
+    "chain_id": 137,
+    "signature_type": 1,
+    "private_key_env": "POLY_PRIVATE_KEY",
+    "funder_env": "POLY_FUNDER"
+  },
+  "alpha_filter": {
+    "enabled": true,
+    "labeled_outcome_csv_path": "var/guh123_alpha_features_btc_5m_outcome_full.csv",
+    "top_fraction": 0.2,
+    "min_predicted_pnl": 0.0,
+    "market_family": "btc",
+    "market_duration_bucket": "5m",
+    "min_seconds_to_resolution": 30.0
+  }
+}

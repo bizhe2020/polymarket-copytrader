@@ -1,0 +1,49 @@
+{
+  "targets": [
+    {
+      "name": "blue-walnut",
+      "profile": "https://polymarket.com/zh/@blue-walnut?tab=activity",
+      "wallet": "0x4b188496d1b3da1716165380999afb9b314c725f",
+      "weight": 1.0
+    }
+  ],
+  "runtime": {
+    "request_timeout_seconds": 60.0,
+    "cache_dir": "var/eval_blue_walnut_last_2d/cache"
+  },
+  "portfolio": {
+    "initial_capital_usdc": 10000.0,
+    "standalone_initial_capital_usdc": 10000.0
+  },
+  "data": {
+    "recent_days": 2,
+    "activity_page_size": 500,
+    "price_fidelity_minutes": 1,
+    "max_trades_per_target": 15000
+  },
+  "strategy": {
+    "follow_fraction": 1.0,
+    "max_order_usdc": 50.0,
+    "min_target_usdc_size": 0.5,
+    "min_order_usdc": 0.5,
+    "max_position_per_asset_usdc": 750.0,
+    "allow_sell": false,
+    "exit_mode": "redeem"
+  },
+  "scenarios": [
+    {
+      "name": "target_reference",
+      "observation_delay_seconds": 0,
+      "extra_slippage_bps": 0.0,
+      "execution_policy": "FOK",
+      "synthetic_levels": 8,
+      "synthetic_depth_multiplier": 8.0,
+      "use_target_trade_price": true
+    }
+  ],
+  "output": {
+    "summary_path": "var/eval_blue_walnut_last_2d/summary.json",
+    "curve_path": "var/eval_blue_walnut_last_2d/equity_curve.csv",
+    "fills_path": "var/eval_blue_walnut_last_2d/fills.jsonl"
+  }
+}
