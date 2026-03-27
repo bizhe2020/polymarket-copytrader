@@ -102,6 +102,8 @@ class LivePaperAlphaBucket:
     external_market_data_dir: Optional[str] = None
     name: Optional[str] = None
     target_names: Optional[List[str]] = None
+    max_entries_per_market: Optional[int] = None
+    max_position_per_market_usdc: Optional[float] = None
 
 
 @dataclass
@@ -149,6 +151,8 @@ class LivePaperState:
     target_last_event_timestamp_ms: Dict[str, int] = field(default_factory=dict)
     seen_keys: List[str] = field(default_factory=list)
     positions: Dict[str, LivePaperPosition] = field(default_factory=dict)
+    alpha_market_entry_counts: Dict[str, int] = field(default_factory=dict)
+    alpha_market_executed_usdc: Dict[str, float] = field(default_factory=dict)
 
     def remember(self, key: str, max_size: int = 20000) -> None:
         self.seen_keys.append(key)
@@ -181,6 +185,14 @@ class LivePaperStateStore:
             },
             seen_keys=list(raw.get("seen_keys", [])),
             positions=positions,
+            alpha_market_entry_counts={
+                str(k): int(v)
+                for k, v in dict(raw.get("alpha_market_entry_counts", {})).items()
+            },
+            alpha_market_executed_usdc={
+                str(k): float(v)
+                for k, v in dict(raw.get("alpha_market_executed_usdc", {})).items()
+            },
         )
 
     def save(self, state: LivePaperState) -> None:
@@ -679,6 +691,7 @@ class MultiTargetLivePaperApp:
             self.state.remember(trade.dedupe_key)
             return
 
+        alpha_decision: Dict[str, object] | None = None
         if self.alpha_filter is not None:
             alpha_decision = self.alpha_filter.evaluate(target_name, trade)
             self.events.write(
@@ -696,6 +709,28 @@ class MultiTargetLivePaperApp:
                 },
             )
             if not bool(alpha_decision.get("should_follow")):
+                self.state.target_last_event_timestamp_ms[target_name] = max(
+                    self.state.target_last_event_timestamp_ms.get(target_name, 0),
+                    trade.timestamp_seconds,
+                )
+                self.state.remember(trade.dedupe_key)
+                return
+            market_limit_reason = self._alpha_market_limit_reason(target_name, trade, alpha_decision)
+            if market_limit_reason is not None:
+                decision = FollowDecision(
+                    should_follow=False,
+                    reason=market_limit_reason,
+                    target_trade=trade,
+                    follow_side="BUY",
+                )
+                self.events.write(
+                    "decision",
+                    {
+                        "target_name": target_name,
+                        "alpha_bucket": alpha_decision.get("alpha_bucket"),
+                        **decision.to_dict(),
+                    },
+                )
                 self.state.target_last_event_timestamp_ms[target_name] = max(
                     self.state.target_last_event_timestamp_ms.get(target_name, 0),
                     trade.timestamp_seconds,
@@ -748,7 +783,28 @@ class MultiTargetLivePaperApp:
 
         if decision.should_follow:
             requested_usdc = float(decision.follow_usdc or 0.0)
-            if requested_usdc > self.state.cash_usdc:
+            alpha_position_limit_reason = self._alpha_market_position_limit_reason(
+                target_name,
+                trade,
+                alpha_decision if self.alpha_filter is not None else None,
+                requested_usdc,
+            )
+            if alpha_position_limit_reason is not None:
+                decision = FollowDecision(
+                    should_follow=False,
+                    reason=alpha_position_limit_reason,
+                    target_trade=trade,
+                    follow_side="BUY",
+                )
+                self.events.write(
+                    "decision",
+                    {
+                        "target_name": target_name,
+                        "alpha_bucket": (alpha_decision or {}).get("alpha_bucket"),
+                        **decision.to_dict(),
+                    },
+                )
+            elif requested_usdc > self.state.cash_usdc:
                 decision = FollowDecision(
                     should_follow=False,
                     reason="skip_no_cash",
@@ -775,6 +831,12 @@ class MultiTargetLivePaperApp:
                     filled_size = float(report.requested_size or 0.0)
                     self.state.cash_usdc -= filled_usdc
                     self._merge_position(trade, filled_size, filled_usdc)
+                    self._record_alpha_market_execution(
+                        target_name,
+                        trade,
+                        alpha_decision if self.alpha_filter is not None else None,
+                        filled_usdc,
+                    )
 
         self.state.target_last_event_timestamp_ms[target_name] = max(
             self.state.target_last_event_timestamp_ms.get(target_name, 0),
@@ -852,6 +914,69 @@ class MultiTargetLivePaperApp:
             target.name: positive_weights[target.name] / weight_sum
             for target in targets
         }
+
+    @staticmethod
+    def _alpha_market_key(
+        target_name: str,
+        trade: TradeActivity,
+        alpha_bucket: str | None,
+    ) -> str:
+        return f"{target_name}:{alpha_bucket or 'alpha'}:{trade.slug}"
+
+    def _alpha_market_limit_reason(
+        self,
+        target_name: str,
+        trade: TradeActivity,
+        alpha_decision: Dict[str, object] | None,
+    ) -> str | None:
+        if not alpha_decision:
+            return None
+        max_entries = alpha_decision.get("max_entries_per_market")
+        if max_entries is None:
+            return None
+        alpha_bucket = str(alpha_decision.get("alpha_bucket") or "")
+        market_key = self._alpha_market_key(target_name, trade, alpha_bucket)
+        current_entries = int(self.state.alpha_market_entry_counts.get(market_key, 0))
+        if current_entries >= int(max_entries):
+            return "skip_alpha_market_entry_limit"
+        return None
+
+    def _alpha_market_position_limit_reason(
+        self,
+        target_name: str,
+        trade: TradeActivity,
+        alpha_decision: Dict[str, object] | None,
+        requested_usdc: float,
+    ) -> str | None:
+        if not alpha_decision or requested_usdc <= 0:
+            return None
+        max_position = alpha_decision.get("max_position_per_market_usdc")
+        if max_position is None:
+            return None
+        alpha_bucket = str(alpha_decision.get("alpha_bucket") or "")
+        market_key = self._alpha_market_key(target_name, trade, alpha_bucket)
+        current_usdc = float(self.state.alpha_market_executed_usdc.get(market_key, 0.0))
+        if current_usdc + requested_usdc > float(max_position):
+            return "skip_alpha_market_position_limit"
+        return None
+
+    def _record_alpha_market_execution(
+        self,
+        target_name: str,
+        trade: TradeActivity,
+        alpha_decision: Dict[str, object] | None,
+        filled_usdc: float,
+    ) -> None:
+        if not alpha_decision or filled_usdc <= 0:
+            return
+        alpha_bucket = str(alpha_decision.get("alpha_bucket") or "")
+        market_key = self._alpha_market_key(target_name, trade, alpha_bucket)
+        self.state.alpha_market_entry_counts[market_key] = (
+            int(self.state.alpha_market_entry_counts.get(market_key, 0)) + 1
+        )
+        self.state.alpha_market_executed_usdc[market_key] = (
+            float(self.state.alpha_market_executed_usdc.get(market_key, 0.0)) + filled_usdc
+        )
 
     def _build_alpha_filter(self) -> Optional["_LiveAlphaFilterRuntime"]:
         config = self.config.alpha_filter
@@ -1303,6 +1428,16 @@ def load_live_paper_config(path: str) -> LivePaperConfig:
             external_market_data_dir=item.get("external_market_data_dir"),
             name=item.get("name"),
             target_names=[str(name) for name in item.get("target_names", [])] or None,
+            max_entries_per_market=(
+                None
+                if item.get("max_entries_per_market") is None
+                else int(item.get("max_entries_per_market"))
+            ),
+            max_position_per_market_usdc=(
+                None
+                if item.get("max_position_per_market_usdc") is None
+                else float(item.get("max_position_per_market_usdc"))
+            ),
         )
         for item in alpha_buckets_raw
     ]
@@ -1432,6 +1567,8 @@ class _LiveAlphaFilterRuntime:
                 min_seconds_to_resolution=float(config.min_seconds_to_resolution),
                 external_market_data_dir=config.external_market_data_dir,
                 target_names=None,
+                max_entries_per_market=None,
+                max_position_per_market_usdc=None,
             )
         ]
 
@@ -1513,6 +1650,8 @@ class _LiveAlphaBucketRuntime:
                 "prediction_threshold": round(self.prediction_threshold, 6),
                 "seconds_to_resolution": seconds_to_resolution,
                 "alpha_bucket": self.config.name or f"{self.config.market_family}_{self.config.market_duration_bucket}",
+                "max_entries_per_market": self.config.max_entries_per_market,
+                "max_position_per_market_usdc": self.config.max_position_per_market_usdc,
             }
         threshold = max(self.prediction_threshold, float(self.config.min_predicted_pnl))
         should_follow = predicted_pnl >= threshold
@@ -1523,4 +1662,6 @@ class _LiveAlphaBucketRuntime:
             "prediction_threshold": round(threshold, 6),
             "seconds_to_resolution": seconds_to_resolution,
             "alpha_bucket": self.config.name or f"{self.config.market_family}_{self.config.market_duration_bucket}",
+            "max_entries_per_market": self.config.max_entries_per_market,
+            "max_position_per_market_usdc": self.config.max_position_per_market_usdc,
         }

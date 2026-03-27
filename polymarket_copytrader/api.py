@@ -285,6 +285,48 @@ def extract_market_token_ids(market: Dict[str, Any]) -> List[str]:
     return []
 
 
+def extract_market_tokens_with_outcomes(market: Dict[str, Any]) -> Dict[str, str]:
+    token_ids = extract_market_token_ids(market)
+    if not token_ids:
+        return {}
+
+    outcomes_raw = (
+        market.get("outcomes")
+        or market.get("outcomeNames")
+        or market.get("outcome_names")
+    )
+    outcome_names: List[str] = []
+    if isinstance(outcomes_raw, list):
+        outcome_names = [str(item) for item in outcomes_raw if str(item)]
+    elif isinstance(outcomes_raw, str):
+        outcome_names = _parse_string_array(outcomes_raw)
+
+    if len(outcome_names) == len(token_ids):
+        return {
+            str(outcome_names[index]): str(token_ids[index])
+            for index in range(len(token_ids))
+        }
+
+    tokens = market.get("tokens")
+    if isinstance(tokens, list):
+        mapped: Dict[str, str] = {}
+        for token in tokens:
+            if not isinstance(token, dict):
+                continue
+            outcome = (
+                token.get("outcome")
+                or token.get("name")
+                or token.get("label")
+                or token.get("title")
+            )
+            token_id = token.get("token_id") or token.get("tokenId") or token.get("id")
+            if outcome and token_id:
+                mapped[str(outcome)] = str(token_id)
+        if mapped:
+            return mapped
+    return {}
+
+
 def _parse_string_array(raw: str) -> List[str]:
     text = raw.strip()
     if not text:

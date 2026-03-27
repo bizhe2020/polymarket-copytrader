@@ -17,6 +17,7 @@ from polymarket_copytrader.live_paper import (
     LivePaperTarget,
     MultiTargetLivePaperApp,
     _infer_resolution_timestamp_seconds,
+    load_live_paper_config,
 )
 from polymarket_copytrader.models import (
     ExecutionConfig,
@@ -471,6 +472,229 @@ class LivePaperTests(unittest.TestCase):
             event_payloads = [payload for kind, payload in app.events.records if kind == "alpha_filter_decision"]
             self.assertEqual(len(event_payloads), 1)
             self.assertEqual(event_payloads[0]["alpha_bucket"], "blue_btc_hourly")
+
+    def test_handle_trade_limits_alpha_entries_per_market(self) -> None:
+        app = self._build_app()
+        rows = [
+            {
+                "sample_id": "xrp-1",
+                "timestamp_seconds": 100,
+                "market_slug": "xrp-updown-15m-100",
+                "condition_id": "cx1",
+                "candidate_outcome": "Down",
+                "label_resolved": 1,
+                "pnl_per_stake_usdc": 30.0,
+                "market_family": "xrp",
+                "market_duration_bucket": "15m",
+                "candidate_abs_price_distance_from_mid": 0.1,
+                "candidate_price_distance_from_mid": -0.1,
+                "time_since_prev_same_market_trade_seconds": 1.0,
+                "time_since_prev_same_condition_trade_seconds": 1.0,
+                "time_since_prev_same_market_outcome_trade_seconds": 1.0,
+                "seconds_to_resolution": 300.0,
+                "recent_condition_count_60s": 5,
+                "recent_same_outcome_count_60s": 4,
+                "recent_opposite_outcome_count_60s": 1,
+                "recent_same_market_count_60s": 5,
+                "recent_same_market_outcome_count_60s": 4,
+                "recent_condition_usdc_60s": 100.0,
+                "recent_same_outcome_usdc_60s": 80.0,
+                "recent_opposite_outcome_usdc_60s": 20.0,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_csv = Path(tmpdir) / "alpha.csv"
+            pd.DataFrame(rows).to_csv(input_csv, index=False)
+            app.config.alpha_filter = LivePaperAlphaFilter(
+                enabled=True,
+                buckets=[
+                    LivePaperAlphaBucket(
+                        labeled_outcome_csv_path=str(input_csv),
+                        market_family="xrp",
+                        market_duration_bucket="15m",
+                        top_fraction=1.0,
+                        min_seconds_to_resolution=30.0,
+                        name="blue_walnut_xrp_15m_observe",
+                        target_names=["blue-walnut"],
+                        max_entries_per_market=1,
+                    )
+                ],
+            )
+            app.alpha_filter = app._build_alpha_filter()
+            first_trade = TradeActivity(
+                proxy_wallet="0xabc",
+                timestamp_ms=1774173283,
+                condition_id="condition-xrp-1",
+                activity_type="TRADE",
+                size=10.0,
+                usdc_size=7.5,
+                transaction_hash="0xtx-xrp-1",
+                price=0.75,
+                asset="asset-xrp-1",
+                side="BUY",
+                outcome_index=1,
+                title="XRP Up or Down",
+                slug="xrp-updown-15m-1774172700",
+                event_slug="xrp-updown-15m-1774172700",
+                outcome="Down",
+            )
+            second_trade = TradeActivity(
+                proxy_wallet="0xabc",
+                timestamp_ms=1774173290,
+                condition_id="condition-xrp-1",
+                activity_type="TRADE",
+                size=9.0,
+                usdc_size=6.5,
+                transaction_hash="0xtx-xrp-2",
+                price=0.72,
+                asset="asset-xrp-2",
+                side="BUY",
+                outcome_index=1,
+                title="XRP Up or Down",
+                slug="xrp-updown-15m-1774172700",
+                event_slug="xrp-updown-15m-1774172700",
+                outcome="Down",
+            )
+
+            app._handle_trade("blue-walnut", first_trade)
+            app._handle_trade("blue-walnut", second_trade)
+
+            executions = [payload for kind, payload in app.events.records if kind == "execution"]
+            decisions = [payload for kind, payload in app.events.records if kind == "decision"]
+            self.assertEqual(len(executions), 1)
+            self.assertTrue(any(d["reason"] == "skip_alpha_market_entry_limit" for d in decisions))
+
+    def test_handle_trade_limits_alpha_market_position_usdc(self) -> None:
+        app = self._build_app()
+        rows = [
+            {
+                "sample_id": "xrp-1",
+                "timestamp_seconds": 100,
+                "market_slug": "xrp-updown-15m-100",
+                "condition_id": "cx1",
+                "candidate_outcome": "Down",
+                "label_resolved": 1,
+                "pnl_per_stake_usdc": 30.0,
+                "market_family": "xrp",
+                "market_duration_bucket": "15m",
+                "candidate_abs_price_distance_from_mid": 0.1,
+                "candidate_price_distance_from_mid": -0.1,
+                "time_since_prev_same_market_trade_seconds": 1.0,
+                "time_since_prev_same_condition_trade_seconds": 1.0,
+                "time_since_prev_same_market_outcome_trade_seconds": 1.0,
+                "seconds_to_resolution": 300.0,
+                "recent_condition_count_60s": 5,
+                "recent_same_outcome_count_60s": 4,
+                "recent_opposite_outcome_count_60s": 1,
+                "recent_same_market_count_60s": 5,
+                "recent_same_market_outcome_count_60s": 4,
+                "recent_condition_usdc_60s": 100.0,
+                "recent_same_outcome_usdc_60s": 80.0,
+                "recent_opposite_outcome_usdc_60s": 20.0,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_csv = Path(tmpdir) / "alpha.csv"
+            pd.DataFrame(rows).to_csv(input_csv, index=False)
+            app.config.alpha_filter = LivePaperAlphaFilter(
+                enabled=True,
+                buckets=[
+                    LivePaperAlphaBucket(
+                        labeled_outcome_csv_path=str(input_csv),
+                        market_family="xrp",
+                        market_duration_bucket="15m",
+                        top_fraction=1.0,
+                        min_seconds_to_resolution=30.0,
+                        name="blue_walnut_xrp_15m_observe",
+                        target_names=["blue-walnut"],
+                        max_position_per_market_usdc=4.0,
+                    )
+                ],
+            )
+            app.alpha_filter = app._build_alpha_filter()
+            trade = TradeActivity(
+                proxy_wallet="0xabc",
+                timestamp_ms=1774173283,
+                condition_id="condition-xrp-1",
+                activity_type="TRADE",
+                size=10.0,
+                usdc_size=7.5,
+                transaction_hash="0xtx-xrp-1",
+                price=0.75,
+                asset="asset-xrp-1",
+                side="BUY",
+                outcome_index=1,
+                title="XRP Up or Down",
+                slug="xrp-updown-15m-1774172700",
+                event_slug="xrp-updown-15m-1774172700",
+                outcome="Down",
+            )
+
+            app._handle_trade("blue-walnut", trade)
+
+            executions = [payload for kind, payload in app.events.records if kind == "execution"]
+            decisions = [payload for kind, payload in app.events.records if kind == "decision"]
+            self.assertEqual(len(executions), 0)
+            self.assertTrue(any(d["reason"] == "skip_alpha_market_position_limit" for d in decisions))
+
+    def test_load_live_paper_config_parses_alpha_market_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "live.json"
+            config_path.write_text(
+                """
+{
+  "targets": [{"name": "blue-walnut", "wallet": "0xabc", "weight": 1.0}],
+  "runtime": {
+    "poll_interval_seconds": 2.0,
+    "request_timeout_seconds": 20.0,
+    "activity_limit": 150,
+    "lookback_seconds_on_start": 20,
+    "requery_overlap_seconds": 5,
+    "duration_hours": 1.0,
+    "state_path": "var/test/state.json",
+    "event_log_path": "var/test/events.jsonl",
+    "hourly_stats_path": "var/test/hourly_stats.csv"
+  },
+  "portfolio": {"initial_capital_usdc": 1000.0},
+  "strategy": {
+    "follow_fraction": 1.0,
+    "fixed_order_usdc": 100.0,
+    "min_target_usdc_size": 0.5,
+    "max_follow_price": 0.995,
+    "max_slippage_bps": 250.0,
+    "max_position_per_asset_usdc": 100.0,
+    "min_order_usdc": 1.0
+  },
+  "execution": {
+    "host": "https://clob.polymarket.com",
+    "chain_id": 137,
+    "signature_type": 1,
+    "private_key_env": "POLY_PRIVATE_KEY",
+    "funder_env": "POLY_FUNDER"
+  },
+  "alpha_filter": {
+    "enabled": true,
+    "buckets": [
+      {
+        "name": "blue_walnut_xrp_15m_observe",
+        "target_names": ["blue-walnut"],
+        "labeled_outcome_csv_path": "var/example.csv",
+        "market_family": "xrp",
+        "market_duration_bucket": "15m",
+        "max_entries_per_market": 1,
+        "max_position_per_market_usdc": 50.0
+      }
+    ]
+  }
+}
+                """.strip(),
+                encoding="utf-8",
+            )
+
+            loaded = load_live_paper_config(str(config_path))
+            bucket = loaded.alpha_filter.buckets[0]
+            self.assertEqual(bucket.max_entries_per_market, 1)
+            self.assertEqual(bucket.max_position_per_market_usdc, 50.0)
 
     def test_handle_trade_uses_synthetic_book_when_order_book_missing(self) -> None:
         app = self._build_app()

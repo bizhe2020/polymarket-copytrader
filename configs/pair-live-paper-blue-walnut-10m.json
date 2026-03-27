@@ -1,0 +1,37 @@
+{
+  "target": {
+    "name": "blue-walnut",
+    "profile": "blue-walnut",
+    "wallet": null
+  },
+  "runtime": {
+    "poll_interval_seconds": 2.0,
+    "request_timeout_seconds": 20.0,
+    "activity_limit": 200,
+    "lookback_seconds_on_start": 300,
+    "requery_overlap_seconds": 6,
+    "market_websocket_enabled": true,
+    "market_websocket_warmup_ms": 350,
+    "require_real_order_book": true,
+    "duration_hours": 0.166667,
+    "heartbeat_interval_seconds": 30.0,
+    "state_path": "var/pair_live_paper_blue_walnut_10m/state.json",
+    "event_log_path": "var/pair_live_paper_blue_walnut_10m/events.jsonl",
+    "hourly_stats_path": "var/pair_live_paper_blue_walnut_10m/hourly_stats.csv"
+  },
+  "portfolio": {
+    "initial_capital_usdc": 10000.0
+  },
+  "scanner": {
+    "families": ["btc", "eth", "sol", "xrp"],
+    "durations": ["15m", "hourly"],
+    "pair_stake_usdc": 100.0,
+    "max_effective_pair_sum": 0.99,
+    "fee_bps": 10.0,
+    "slippage_bps": 50.0,
+    "max_entries_per_market": 1,
+    "observe_target_activity": true,
+    "market_trigger_enabled": true,
+    "market_search_limit": 10
+  }
+}

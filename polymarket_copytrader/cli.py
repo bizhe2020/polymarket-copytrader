@@ -37,7 +37,18 @@ from .evaluation import build_evaluation_app
 from .external_market_data import ExternalMarketFetchConfig, fetch_external_market_data
 from .follower import build_app
 from .live_paper import build_live_paper_app
+from .market_open_snapshot import MarketOpenSnapshotConfig, build_market_open_snapshot_dataset
 from .models import TradeActivity
+from .pair_analysis import (
+    PairAnalysisConfig,
+    PairPaperReplayConfig,
+    PairSequenceAnalysisConfig,
+    run_pair_analysis,
+    run_pair_paper_replay,
+    run_pair_sequence_analysis,
+)
+from .pair_live_paper import build_pair_live_paper_app
+from .post_pair_cycle_loop import PostPairCycleLoopConfig, build_post_pair_cycle_loop_dataset
 from .signal_price_cache import SignalPriceCacheConfig, fetch_signal_price_cache
 
 
@@ -230,6 +241,65 @@ def build_parser() -> argparse.ArgumentParser:
     market_data_cmd.add_argument("--end-timestamp-seconds", type=int)
     market_data_cmd.add_argument("--families", default="btc,eth")
 
+    pair_cmd = subparsers.add_parser("pair-analysis")
+    pair_cmd.add_argument("--input-trades", required=True)
+    pair_cmd.add_argument("--output-csv", required=True)
+    pair_cmd.add_argument("--summary-json", required=True)
+    pair_cmd.add_argument("--recent-buy-limit", type=int, default=5000)
+    pair_cmd.add_argument("--families", default="btc,eth,sol,xrp")
+    pair_cmd.add_argument("--durations", default="15m,hourly,other")
+
+    pair_replay_cmd = subparsers.add_parser("pair-paper-replay")
+    pair_replay_cmd.add_argument("--input-csv", required=True)
+    pair_replay_cmd.add_argument("--output-json", required=True)
+    pair_replay_cmd.add_argument("--curve-csv")
+    pair_replay_cmd.add_argument("--trades-csv")
+    pair_replay_cmd.add_argument("--initial-capital-usdc", type=float, default=10000.0)
+    pair_replay_cmd.add_argument("--stake-usdc", type=float, default=100.0)
+    pair_replay_cmd.add_argument("--max-effective-pair-sum", type=float, default=1.0)
+    pair_replay_cmd.add_argument("--fee-bps", type=float, default=0.0)
+    pair_replay_cmd.add_argument("--slippage-bps", type=float, default=0.0)
+    pair_replay_cmd.add_argument("--max-pair-completion-seconds", type=int)
+    pair_replay_cmd.add_argument("--max-imbalance-ratio", type=float)
+    pair_replay_cmd.add_argument("--top-fraction", type=float)
+    pair_replay_cmd.add_argument("--pair-sum-column", default="pair_sum")
+    pair_replay_cmd.add_argument("--pair-gap-column", default="pair_gap_to_parity")
+    pair_replay_cmd.add_argument("--timestamp-column", default="pair_end_timestamp_seconds")
+    pair_replay_cmd.add_argument("--seconds-to-resolution-column")
+    pair_replay_cmd.add_argument("--min-seconds-to-resolution", type=int)
+    pair_replay_cmd.add_argument("--max-seconds-to-resolution", type=int)
+
+    pair_seq_cmd = subparsers.add_parser("pair-sequence-analysis")
+    pair_seq_cmd.add_argument("--input-trades", required=True)
+    pair_seq_cmd.add_argument("--output-csv", required=True)
+    pair_seq_cmd.add_argument("--summary-json", required=True)
+    pair_seq_cmd.add_argument("--recent-buy-limit", type=int, default=50000)
+    pair_seq_cmd.add_argument("--families", default="btc,eth,sol,xrp")
+    pair_seq_cmd.add_argument("--durations", default="15m,hourly")
+
+    market_open_cmd = subparsers.add_parser("market-open-snapshot")
+    market_open_cmd.add_argument("--input-trades", required=True)
+    market_open_cmd.add_argument("--output-csv", required=True)
+    market_open_cmd.add_argument("--summary-json", required=True)
+    market_open_cmd.add_argument("--market-universe")
+    market_open_cmd.add_argument("--families", default="btc,eth,sol,xrp")
+    market_open_cmd.add_argument("--durations", default="hourly")
+    market_open_cmd.add_argument("--snapshot-offsets", default="0,1,3,5,10,30,60")
+    market_open_cmd.add_argument("--entry-horizon-seconds", type=int, default=60)
+
+    cycle_loop_cmd = subparsers.add_parser("post-pair-cycle-loop")
+    cycle_loop_cmd.add_argument("--input-trades", required=True)
+    cycle_loop_cmd.add_argument("--output-csv", required=True)
+    cycle_loop_cmd.add_argument("--summary-json", required=True)
+    cycle_loop_cmd.add_argument("--families", default="btc,eth,sol,xrp")
+    cycle_loop_cmd.add_argument("--durations", default="hourly")
+    cycle_loop_cmd.add_argument("--cycle-start-horizon-seconds", type=int, default=180)
+    cycle_loop_cmd.add_argument("--cycle-complete-horizon-seconds", type=int, default=60)
+
+    pair_live_cmd = subparsers.add_parser("pair-live-paper")
+    pair_live_cmd.add_argument("--config", required=True)
+    pair_live_cmd.add_argument("--once", action="store_true")
+
     live_paper_cmd = subparsers.add_parser("live-paper")
     live_paper_cmd.add_argument("--config", required=True)
     live_paper_cmd.add_argument("--once", action="store_true")
@@ -278,6 +348,105 @@ def main(argv: List[str] | None = None) -> int:
                 )
             )
             print(json.dumps(summary.__dict__, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "pair-analysis":
+            summary = run_pair_analysis(
+                PairAnalysisConfig(
+                    input_trades_path=args.input_trades,
+                    output_csv_path=args.output_csv,
+                    output_json_path=args.summary_json,
+                    recent_buy_limit=args.recent_buy_limit,
+                    families=tuple(item.strip() for item in args.families.split(",") if item.strip()),
+                    durations=tuple(item.strip() for item in args.durations.split(",") if item.strip()),
+                )
+            )
+            print(json.dumps(asdict(summary), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "pair-paper-replay":
+            summary = run_pair_paper_replay(
+                PairPaperReplayConfig(
+                    input_csv_path=args.input_csv,
+                    output_json_path=args.output_json,
+                    curve_csv_path=args.curve_csv,
+                    trades_csv_path=args.trades_csv,
+                    initial_capital_usdc=args.initial_capital_usdc,
+                    stake_usdc=args.stake_usdc,
+                    max_effective_pair_sum=args.max_effective_pair_sum,
+                    fee_bps=args.fee_bps,
+                    slippage_bps=args.slippage_bps,
+                    max_pair_completion_seconds=args.max_pair_completion_seconds,
+                    max_imbalance_ratio=args.max_imbalance_ratio,
+                    top_fraction=args.top_fraction,
+                    pair_sum_column=args.pair_sum_column,
+                    pair_gap_column=args.pair_gap_column,
+                    timestamp_column=args.timestamp_column,
+                    seconds_to_resolution_column=args.seconds_to_resolution_column,
+                    min_seconds_to_resolution=args.min_seconds_to_resolution,
+                    max_seconds_to_resolution=args.max_seconds_to_resolution,
+                )
+            )
+            print(json.dumps(asdict(summary), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "pair-sequence-analysis":
+            summary = run_pair_sequence_analysis(
+                PairSequenceAnalysisConfig(
+                    input_trades_path=args.input_trades,
+                    output_csv_path=args.output_csv,
+                    output_json_path=args.summary_json,
+                    recent_buy_limit=args.recent_buy_limit,
+                    families=tuple(item.strip() for item in args.families.split(",") if item.strip()),
+                    durations=tuple(item.strip() for item in args.durations.split(",") if item.strip()),
+                )
+            )
+            print(json.dumps(asdict(summary), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "market-open-snapshot":
+            summary = build_market_open_snapshot_dataset(
+                MarketOpenSnapshotConfig(
+                    input_trades_path=args.input_trades,
+                    output_csv_path=args.output_csv,
+                    summary_json_path=args.summary_json,
+                    market_universe_path=args.market_universe,
+                    families=tuple(item.strip() for item in args.families.split(",") if item.strip()),
+                    durations=tuple(item.strip() for item in args.durations.split(",") if item.strip()),
+                    snapshot_offsets_seconds=tuple(
+                        int(item.strip()) for item in args.snapshot_offsets.split(",") if item.strip()
+                    ),
+                    entry_horizon_seconds=args.entry_horizon_seconds,
+                )
+            )
+            print(json.dumps(asdict(summary), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "post-pair-cycle-loop":
+            summary = build_post_pair_cycle_loop_dataset(
+                PostPairCycleLoopConfig(
+                    input_trades_path=args.input_trades,
+                    output_csv_path=args.output_csv,
+                    summary_json_path=args.summary_json,
+                    families=tuple(item.strip() for item in args.families.split(",") if item.strip()),
+                    durations=tuple(item.strip() for item in args.durations.split(",") if item.strip()),
+                    cycle_start_horizon_seconds=args.cycle_start_horizon_seconds,
+                    cycle_complete_horizon_seconds=args.cycle_complete_horizon_seconds,
+                )
+            )
+            print(json.dumps(asdict(summary), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "pair-live-paper":
+            app = build_pair_live_paper_app(args.config)
+            if args.once:
+                for line in app.doctor():
+                    print(line)
+                app.run(once=True)
+                return 0
+            for line in app.doctor():
+                print(line)
+            app.run(once=False)
             return 0
 
         if args.command == "alpha-baseline":
