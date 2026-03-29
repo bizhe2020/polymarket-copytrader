@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
-from typing import Dict, Iterable, List
+from dataclasses import dataclass, asdict
+from typing import Any, Dict, Iterable, List, Optional
 
 from .api import PolymarketPublicApi, extract_market_token_ids
 from .config import load_config
 from .execution import ExecutionClient, build_execution_client
 from .market_ws import build_market_stream
-from .models import AppConfig, OrderBook, PriceLevel, StateSnapshot, TradeActivity
+from .models import AppConfig, FollowDecision, OrderBook, PriceLevel, StateSnapshot, TradeActivity
 from .resolve import resolve_target_wallet
 from .store import EventSink, StateStore
 from .strategy import MirrorTradeStrategy
@@ -26,6 +26,7 @@ class CopyTraderApp:
         self.market_stream = build_market_stream() if config.runtime.market_websocket_enabled else None
         self._event_assets_cache: Dict[str, List[str]] = {}
         self._hot_pool_assets_cache: Dict[str, List[str]] = {}
+
         if self.market_stream is None:
             self.events.write("market_ws_disabled", {"reason": "disabled_in_config"})
         elif not self.market_stream.available:
@@ -193,6 +194,7 @@ class CopyTraderApp:
         current_position_size = self.execution.current_position_size(trade.asset)
         reference_price = book.best_ask or book.best_bid or book.last_trade_price or trade.price
         current_exposure = current_position_size * float(reference_price)
+
         decision = self.strategy.decide(
             trade,
             book,
