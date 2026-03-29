@@ -135,6 +135,8 @@ class FollowerTests(unittest.TestCase):
         app._execution = PaperExecutionClient(app.config.execution, app.state)
         app._event_assets_cache = {}
         app._hot_pool_assets_cache = {}
+        app._pair_unit_strategy = None
+        app._pair_unit_enabled = False
         return app
 
     def test_handle_trade_prefers_market_ws_book(self) -> None:

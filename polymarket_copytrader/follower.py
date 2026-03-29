@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, Iterable, List, Optional
+from dataclasses import asdict
+from typing import Dict, Iterable, List, Optional
 
 from .api import PolymarketPublicApi, extract_market_token_ids
 from .config import load_config
@@ -102,6 +102,7 @@ class CopyTraderApp:
             core_assets=[trade.asset for trade in trades],
             related_assets=related_assets,
         )
+
         for trade in sorted(trades, key=self._trade_priority_key):
             self._handle_trade(trade)
         self.store.save(self.state)
@@ -464,7 +465,6 @@ class CopyTraderApp:
             neg_risk=False,
             last_trade_price=price,
         )
-
 
 def build_app(config_path: str) -> CopyTraderApp:
     return CopyTraderApp(load_config(config_path))

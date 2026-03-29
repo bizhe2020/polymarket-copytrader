@@ -570,7 +570,7 @@ def build_parser() -> argparse.ArgumentParser:
     pair_live_cmd.add_argument("--config", required=True)
     pair_live_cmd.add_argument("--once", action="store_true")
 
-    live_paper_cmd = subparsers.add_parser("live-paper")
+    live_paper_cmd = subparsers.add_parser("live-paper", help="Legacy live-paper runtime")
     live_paper_cmd.add_argument("--config", required=True)
     live_paper_cmd.add_argument("--once", action="store_true")
     return parser
