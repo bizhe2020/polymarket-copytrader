@@ -1,40 +1,19 @@
 """
-PairUnitStrategy — runtime strategy runner for blue-walnut pair-unit building.
+PairUnitStrategy — scanner-facing rule engine for blue-walnut pair units.
 
-Reads the assembled skeleton config (via skeleton_assembler) and executes
-the family-specific state machine for each active family:
+Reads the assembled skeleton config and evaluates the family-specific state machine:
 
     observe_open -> enter_first_leg -> monitor_second_leg -> complete_or_timeout
 
-Acceptance-band strings
-----------------------
-The skeleton uses compact band notation (e.g. "-2c~-1c", "<=-2c", "0~1c").
-Parse those into structured bounds:
+The intended caller is a local market scanner. The scanner is responsible for:
 
-    "-2c~-1c"   ->  lower=-0.02, upper=-0.01
-    "<=-2c"     ->  upper=-0.02, lower=None (unbounded below)
-    ">-1c"      ->  lower=-0.01, upper=None (unbounded above)
-    "0~1c"      ->  lower=0.00, upper=0.01
-    etc.
+1. registering market open time via `on_market_open()`
+2. passing local book candidates into `evaluate_market_candidate()`
+3. opening a tracked first leg via `open_market_candidate()`
+4. polling `evaluate_second_leg_completion()` on the opposite-leg price
 
-Route classes
--------------
-Each route class maps to a concrete (wait_budget_70pct, wait_budget_80pct, timeout)
-triple loaded from the skeleton.
-
-Usage
------
-    from polymarket_copytrader.config.skeleton_assembler import load_skeleton
-    from polymarket_copytrader.pair_unit_strategy import PairUnitStrategy
-
-    bundle = load_skeleton()
-    strategy = PairUnitStrategy(bundle)
-
-    decision = strategy.decide(trade, order_book, ...)
-    # or for a full market lifecycle:
-    strategy.on_market_open(market_slug, family, open_timestamp)
-    strategy.on_trade(market_slug, trade)
-    strategy.tick(market_slug, current_timestamp)
+Legacy wrappers (`evaluate_first_leg_entry`, `enter_first_leg`) remain for compatibility,
+but the preferred API no longer assumes a target-wallet trade as the trigger source.
 """
 
 from __future__ import annotations
@@ -384,7 +363,7 @@ class PairUnitStrategy:
         return list(self._pending_units.values())
 
     def on_market_open(self, market_slug: str, family: str, open_timestamp: float) -> None:
-        """Call when a new market opens. Starts the entry observation window."""
+        """Register a market open timestamp so scanner candidates can be window-checked."""
         self._market_open_times[market_slug] = open_timestamp
         # Clean up any stale units for this market
         self._market_units[market_slug] = []
@@ -434,16 +413,16 @@ class PairUnitStrategy:
 
         return decisions
 
-    def evaluate_first_leg_entry(
+    def evaluate_market_candidate(
         self,
         market_slug: str,
         family: str,
-        trade_price: float,
-        trade_usdc_size: float,
+        candidate_price: float,
+        candidate_usdc_size: float,
         current_time: Optional[float] = None,
     ) -> PairUnitDecision:
         """
-        Evaluate whether to enter a first leg for a given trade.
+        Evaluate whether a scanner-observed candidate should become the first leg.
 
         Returns a PairUnitDecision with action="enter_first_leg" or "skip".
         """
@@ -486,16 +465,16 @@ class PairUnitStrategy:
                 )
 
         # Price band check
-        if not (entry.price_band_lower <= trade_price <= entry.price_band_upper):
+        if not (entry.price_band_lower <= candidate_price <= entry.price_band_upper):
             return PairUnitDecision(
                 "skip",
-                f"price_out_of_band_{family}_{trade_price:.4f}",
+                f"price_out_of_band_{family}_{candidate_price:.4f}",
                 market_slug=market_slug,
             )
 
         # Size policy check
         size_reason, target_usdc = self._evaluate_size_policy(
-            trade_usdc_size, entry, family
+            candidate_usdc_size, entry, family
         )
         if size_reason != "size_ok":
             return PairUnitDecision(
@@ -513,7 +492,7 @@ class PairUnitStrategy:
             action="enter_first_leg",
             reason=f"entry_ok_{family}_regime_{regime}",
             market_slug=market_slug,
-            price=trade_price,
+            price=candidate_price,
             usdc_size=target_usdc,
             side="BUY",
             wait_budget_seconds=wait_80,
@@ -536,7 +515,7 @@ class PairUnitStrategy:
             },
         )
 
-    def enter_first_leg(
+    def evaluate_first_leg_entry(
         self,
         market_slug: str,
         family: str,
@@ -544,11 +523,28 @@ class PairUnitStrategy:
         trade_usdc_size: float,
         current_time: Optional[float] = None,
     ) -> PairUnitDecision:
+        """Compatibility wrapper for legacy callers. Prefer evaluate_market_candidate()."""
+        return self.evaluate_market_candidate(
+            market_slug=market_slug,
+            family=family,
+            candidate_price=trade_price,
+            candidate_usdc_size=trade_usdc_size,
+            current_time=current_time,
+        )
+
+    def open_market_candidate(
+        self,
+        market_slug: str,
+        family: str,
+        candidate_price: float,
+        candidate_usdc_size: float,
+        current_time: Optional[float] = None,
+    ) -> PairUnitDecision:
         """
-        Commit to opening a first leg. Creates a PendingPairUnit.
+        Commit to opening a scanner-selected first leg and create a PendingPairUnit.
         """
-        decision = self.evaluate_first_leg_entry(
-            market_slug, family, trade_price, trade_usdc_size, current_time
+        decision = self.evaluate_market_candidate(
+            market_slug, family, candidate_price, candidate_usdc_size, current_time
         )
         if decision.action != "enter_first_leg":
             return decision
@@ -568,8 +564,8 @@ class PairUnitStrategy:
                 family=family,
                 open_timestamp=open_time,
                 entry_timestamp=now,
-                price=trade_price,
-                usdc_size=decision.usdc_size or trade_usdc_size,
+                price=candidate_price,
+                usdc_size=decision.usdc_size or candidate_usdc_size,
                 condition_id="",          # filled by caller
                 side="BUY",
             ),
@@ -590,6 +586,23 @@ class PairUnitStrategy:
         decision.unit_id = unit_id
         decision.details["unit_id"] = unit_id
         return decision
+
+    def enter_first_leg(
+        self,
+        market_slug: str,
+        family: str,
+        trade_price: float,
+        trade_usdc_size: float,
+        current_time: Optional[float] = None,
+    ) -> PairUnitDecision:
+        """Compatibility wrapper for legacy callers. Prefer open_market_candidate()."""
+        return self.open_market_candidate(
+            market_slug=market_slug,
+            family=family,
+            candidate_price=trade_price,
+            candidate_usdc_size=trade_usdc_size,
+            current_time=current_time,
+        )
 
     def evaluate_second_leg_completion(
         self,

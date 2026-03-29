@@ -23,6 +23,7 @@
     "initial_capital_usdc": 10000.0
   },
   "scanner": {
+    "skeleton_config_path": "var/research_blue_walnut/strategy_config_skeleton_v0.json",
     "families": ["btc", "eth", "sol", "xrp"],
     "durations": ["hourly"],
     "pair_stake_usdc": 100.0,

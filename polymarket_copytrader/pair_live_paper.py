@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .api import PolymarketPublicApi, extract_market_tokens_with_outcomes
+from .config.skeleton_assembler import load_skeleton
 from .market_ws import build_market_stream
 from .models import OrderBook, TradeActivity
+from .pair_unit_strategy import PairUnitStrategy
 from .resolve import resolve_target_wallet
 from .store import EventSink
 
@@ -49,6 +51,7 @@ class PairLivePaperPortfolio:
 class PairScannerConfig:
     families: List[str] = field(default_factory=lambda: ["btc", "eth", "sol", "xrp"])
     durations: List[str] = field(default_factory=lambda: ["hourly"])
+    skeleton_config_path: Optional[str] = None
     pair_stake_usdc: float = 100.0
     max_effective_pair_sum: float = 1.0
     fee_bps: float = 0.0
@@ -118,6 +121,7 @@ class PairPendingEntry:
     opened_at_seconds: int
     expires_at_seconds: int
     resolution_timestamp_seconds: Optional[int] = None
+    strategy_reason: str = ""
 
 
 @dataclass
@@ -342,11 +346,21 @@ class PairLivePaperApp:
         self.store = PairLivePaperStateStore(config.runtime.state_path)
         self.state = self.store.load()
         self.market_stream = build_market_stream() if config.runtime.market_websocket_enabled else None
+        self.strategy_bundle = load_skeleton(config.scanner.skeleton_config_path)
+        self.rule_engine = PairUnitStrategy(self.strategy_bundle)
         self.target = self._resolve_target()
         self.hourly_stats = PairHourlyStatsWriter(config.runtime.hourly_stats_path)
         self._event_market_cache: Dict[str, List[PairMarketDescriptor]] = {}
         self._observed_pair_contexts: Dict[str, _ObservedPairContext] = {}
         self._initialize_session()
+        self.events.write(
+            "pair_strategy_bundle_loaded",
+            {
+                "bundle_id": self.strategy_bundle.get("bundle_id"),
+                "skeleton_config_path": config.scanner.skeleton_config_path or "default",
+                "families": self.rule_engine.families_configured(),
+            },
+        )
         if self.market_stream is None:
             self.events.write("market_ws_disabled", {"reason": "disabled_in_config"})
         elif not self.market_stream.available:
@@ -363,14 +377,16 @@ class PairLivePaperApp:
             f"pair_stake_usdc={self.config.scanner.pair_stake_usdc}",
             f"families={','.join(self.config.scanner.families)}",
             f"durations={','.join(self.config.scanner.durations)}",
+            f"skeleton_config_path={self.config.scanner.skeleton_config_path or 'default'}",
+            f"active_strategy_families={','.join(self.rule_engine.families_configured())}",
             f"observe_target_activity={self.config.scanner.observe_target_activity}",
             f"market_trigger_enabled={self.config.scanner.market_trigger_enabled}",
             f"min_seconds_to_resolution={self.config.scanner.min_seconds_to_resolution}",
             f"max_seconds_to_resolution={self.config.scanner.max_seconds_to_resolution}",
             f"staged_entry_enabled={self.config.scanner.staged_entry_enabled}",
-            f"first_leg_price_floor={self.config.scanner.first_leg_price_floor}",
-            f"first_leg_price_ceiling={self.config.scanner.first_leg_price_ceiling}",
-            f"max_leg_wait_seconds={self.config.scanner.max_leg_wait_seconds}",
+            f"legacy_first_leg_price_floor={self.config.scanner.first_leg_price_floor}",
+            f"legacy_first_leg_price_ceiling={self.config.scanner.first_leg_price_ceiling}",
+            f"legacy_max_leg_wait_seconds={self.config.scanner.max_leg_wait_seconds}",
             f"rebalance_enabled={self.config.scanner.rebalance_enabled}",
             f"max_rebalances_per_market={self.config.scanner.max_rebalances_per_market}",
             f"rebalance_window_seconds={self.config.scanner.rebalance_window_seconds}",
@@ -653,6 +669,39 @@ class PairLivePaperApp:
         )
         self._finalize_trade_cursor(trade)
 
+    def _family_strategy(self, market_family: str):
+        return self.rule_engine.families.get(market_family)
+
+    def _register_market_open(
+        self,
+        *,
+        descriptor: PairMarketDescriptor,
+        market_family: str,
+        market_duration_bucket: str,
+        now_seconds: int,
+    ) -> None:
+        open_timestamp = _infer_market_open_timestamp_seconds(
+            descriptor.resolution_timestamp_seconds,
+            market_duration_bucket,
+        )
+        if open_timestamp is None:
+            open_timestamp = float(now_seconds)
+        self.rule_engine.on_market_open(descriptor.market_slug, market_family, float(open_timestamp))
+
+    def _effective_resolution_window(
+        self,
+        *,
+        market_family: str,
+    ) -> tuple[Optional[int], Optional[int]]:
+        family_cfg = self._family_strategy(market_family)
+        family_min = family_cfg.entry.min_seconds_to_resolution if family_cfg is not None else None
+        scanner_min = self.config.scanner.min_seconds_to_resolution
+        scanner_max = self.config.scanner.max_seconds_to_resolution
+
+        min_candidates = [value for value in (family_min, scanner_min) if value is not None]
+        effective_min = max(min_candidates) if min_candidates else None
+        return effective_min, scanner_max
+
     def _evaluate_pair_descriptor(
         self,
         *,
@@ -663,6 +712,22 @@ class PairLivePaperApp:
         trigger_mode: str,
         reference_payload: Dict[str, object],
     ) -> None:
+        family_cfg = self._family_strategy(market_family)
+        if family_cfg is None:
+            payload = dict(reference_payload)
+            payload.update(
+                {
+                    "reason": "skip_family_not_in_skeleton",
+                    "trigger_mode": trigger_mode,
+                    "market_slug": descriptor.market_slug,
+                    "event_slug": event_slug,
+                    "market_family": market_family,
+                    "market_duration_bucket": market_duration_bucket,
+                }
+            )
+            self.events.write("pair_scanner_decision", payload)
+            return
+
         market_key = descriptor.market_slug or descriptor.condition_id
         existing_position = self.state.positions.get(market_key)
         pending_entry = self.state.pending_entries.get(market_key)
@@ -676,12 +741,19 @@ class PairLivePaperApp:
             self.events.write("pair_scanner_decision", payload)
             return
         now_seconds = int(time.time())
+        self._register_market_open(
+            descriptor=descriptor,
+            market_family=market_family,
+            market_duration_bucket=market_duration_bucket,
+            now_seconds=now_seconds,
+        )
         resolution_ts = descriptor.resolution_timestamp_seconds
         seconds_to_resolution = (
             resolution_ts - now_seconds if resolution_ts is not None else None
         )
-        min_seconds_to_resolution = self.config.scanner.min_seconds_to_resolution
-        max_seconds_to_resolution = self.config.scanner.max_seconds_to_resolution
+        min_seconds_to_resolution, max_seconds_to_resolution = self._effective_resolution_window(
+            market_family=market_family,
+        )
         if (
             seconds_to_resolution is not None
             and (
@@ -706,6 +778,8 @@ class PairLivePaperApp:
                     "market_duration_bucket": market_duration_bucket,
                     "resolution_timestamp_seconds": resolution_ts,
                     "seconds_to_resolution": seconds_to_resolution,
+                    "effective_min_seconds_to_resolution": min_seconds_to_resolution,
+                    "effective_max_seconds_to_resolution": max_seconds_to_resolution,
                 }
             )
             self.events.write("pair_scanner_decision", payload)
@@ -812,6 +886,67 @@ class PairLivePaperApp:
                 seconds_to_resolution=seconds_to_resolution,
                 now_seconds=now_seconds,
             )
+            return
+
+        candidate = select_first_leg_candidate(
+            up_ask=up_ask,
+            down_ask=down_ask,
+            up_asset=descriptor.up_asset,
+            down_asset=descriptor.down_asset,
+            up_outcome=descriptor.up_outcome,
+            down_outcome=descriptor.down_outcome,
+            up_book_source=up_source,
+            down_book_source=down_source,
+            preferred_outcome=str(reference_payload.get("outcome") or "") or None,
+            price_floor=family_cfg.entry.price_band_lower,
+            price_ceiling=family_cfg.entry.price_band_upper,
+        )
+        if candidate is None:
+            payload = dict(reference_payload)
+            payload.update(
+                {
+                    "reason": "skip_first_leg_price_window",
+                    "trigger_mode": trigger_mode,
+                    "market_slug": descriptor.market_slug,
+                    "event_slug": event_slug,
+                    "market_family": market_family,
+                    "market_duration_bucket": market_duration_bucket,
+                    "seconds_to_resolution": seconds_to_resolution,
+                    "up_ask": round(up_ask, 6),
+                    "down_ask": round(down_ask, 6),
+                    "skeleton_price_band": [
+                        family_cfg.entry.price_band_lower,
+                        family_cfg.entry.price_band_upper,
+                    ],
+                }
+            )
+            self.events.write("pair_scanner_decision", payload)
+            return
+
+        entry_decision = self.rule_engine.evaluate_market_candidate(
+            market_slug=descriptor.market_slug,
+            family=market_family,
+            candidate_price=float(candidate.ask_price),
+            candidate_usdc_size=float(self.config.scanner.pair_stake_usdc),
+            current_time=float(now_seconds),
+        )
+        if entry_decision.action != "enter_first_leg":
+            payload = dict(reference_payload)
+            payload.update(
+                {
+                    "reason": entry_decision.reason,
+                    "trigger_mode": trigger_mode,
+                    "market_slug": descriptor.market_slug,
+                    "event_slug": event_slug,
+                    "market_family": market_family,
+                    "market_duration_bucket": market_duration_bucket,
+                    "seconds_to_resolution": seconds_to_resolution,
+                    "first_leg_outcome": candidate.outcome,
+                    "first_leg_price": round(candidate.ask_price, 6),
+                    "strategy_details": entry_decision.details,
+                }
+            )
+            self.events.write("pair_scanner_decision", payload)
             return
 
         plan = compute_pair_execution_plan(
@@ -926,6 +1061,13 @@ class PairLivePaperApp:
         seconds_to_resolution: Optional[int],
         now_seconds: int,
     ) -> None:
+        family_cfg = self._family_strategy(market_family)
+        if family_cfg is None:
+            payload = dict(reference_payload)
+            payload.update({"reason": "skip_family_not_in_skeleton", "trigger_mode": trigger_mode})
+            self.events.write("pair_scanner_decision", payload)
+            return
+
         preferred_outcome = reference_payload.get("outcome")
         candidate = select_first_leg_candidate(
             up_ask=up_ask,
@@ -937,8 +1079,8 @@ class PairLivePaperApp:
             up_book_source=up_source,
             down_book_source=down_source,
             preferred_outcome=str(preferred_outcome) if preferred_outcome is not None else None,
-            price_floor=self.config.scanner.first_leg_price_floor,
-            price_ceiling=self.config.scanner.first_leg_price_ceiling,
+            price_floor=family_cfg.entry.price_band_lower,
+            price_ceiling=family_cfg.entry.price_band_upper,
         )
         if candidate is None:
             payload = dict(reference_payload)
@@ -953,10 +1095,41 @@ class PairLivePaperApp:
                     "seconds_to_resolution": seconds_to_resolution,
                     "up_ask": round(up_ask, 6),
                     "down_ask": round(down_ask, 6),
+                    "skeleton_price_band": [
+                        family_cfg.entry.price_band_lower,
+                        family_cfg.entry.price_band_upper,
+                    ],
                 }
             )
             self.events.write("pair_scanner_decision", payload)
             return
+
+        entry_decision = self.rule_engine.evaluate_market_candidate(
+            market_slug=descriptor.market_slug,
+            family=market_family,
+            candidate_price=float(candidate.ask_price),
+            candidate_usdc_size=float(self.config.scanner.pair_stake_usdc),
+            current_time=float(now_seconds),
+        )
+        if entry_decision.action != "enter_first_leg":
+            payload = dict(reference_payload)
+            payload.update(
+                {
+                    "reason": entry_decision.reason,
+                    "trigger_mode": trigger_mode,
+                    "market_slug": descriptor.market_slug,
+                    "event_slug": event_slug,
+                    "market_family": market_family,
+                    "market_duration_bucket": market_duration_bucket,
+                    "seconds_to_resolution": seconds_to_resolution,
+                    "first_leg_outcome": candidate.outcome,
+                    "first_leg_price": round(candidate.ask_price, 6),
+                    "strategy_details": entry_decision.details,
+                }
+            )
+            self.events.write("pair_scanner_decision", payload)
+            return
+
         opposite_limit = compute_opposite_leg_price_limit(
             first_leg_price=candidate.ask_price,
             fee_bps=self.config.scanner.fee_bps,
@@ -997,8 +1170,9 @@ class PairLivePaperApp:
             first_leg_book_source=candidate.book_source,
             opposite_leg_price_limit=round(opposite_limit, 6),
             opened_at_seconds=now_seconds,
-            expires_at_seconds=now_seconds + int(self.config.scanner.max_leg_wait_seconds),
+            expires_at_seconds=now_seconds + int(family_cfg.second_leg.timeout_seconds),
             resolution_timestamp_seconds=descriptor.resolution_timestamp_seconds,
+            strategy_reason=entry_decision.reason,
         )
         payload = dict(reference_payload)
         payload.update(
@@ -1013,7 +1187,9 @@ class PairLivePaperApp:
                 "first_leg_outcome": candidate.outcome,
                 "first_leg_price": round(candidate.ask_price, 6),
                 "opposite_leg_price_limit": round(opposite_limit, 6),
-                "expires_at_seconds": now_seconds + int(self.config.scanner.max_leg_wait_seconds),
+                "expires_at_seconds": now_seconds + int(family_cfg.second_leg.timeout_seconds),
+                "strategy_reason": entry_decision.reason,
+                "strategy_details": entry_decision.details,
             }
         )
         self.events.write("pair_scanner_decision", payload)
@@ -1562,6 +1738,22 @@ def _market_duration_bucket_from_text(text: str) -> str:
     return "other"
 
 
+def _infer_market_open_timestamp_seconds(
+    resolution_timestamp_seconds: Optional[int],
+    market_duration_bucket: str,
+) -> Optional[int]:
+    if resolution_timestamp_seconds is None:
+        return None
+    duration_seconds = {
+        "hourly": 3600,
+        "15m": 900,
+        "5m": 300,
+    }.get(str(market_duration_bucket), 0)
+    if duration_seconds <= 0:
+        return None
+    return int(resolution_timestamp_seconds) - duration_seconds
+
+
 def _isoformat(timestamp_seconds: int) -> str:
     return datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc).isoformat()
 
@@ -1599,6 +1791,7 @@ def load_pair_live_paper_config(path: str) -> PairLivePaperConfig:
         scanner=PairScannerConfig(
             families=[str(item) for item in raw["scanner"].get("families", ["btc", "eth", "sol", "xrp"])],
             durations=[str(item) for item in raw["scanner"].get("durations", ["hourly"])],
+            skeleton_config_path=raw["scanner"].get("skeleton_config_path"),
             pair_stake_usdc=float(raw["scanner"].get("pair_stake_usdc", 100.0)),
             max_effective_pair_sum=float(raw["scanner"].get("max_effective_pair_sum", 1.0)),
             fee_bps=float(raw["scanner"].get("fee_bps", 0.0)),
