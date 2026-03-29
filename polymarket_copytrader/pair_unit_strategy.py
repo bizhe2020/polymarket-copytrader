@@ -362,6 +362,19 @@ class PairUnitStrategy:
     def get_pending_units(self) -> List[PendingPairUnit]:
         return list(self._pending_units.values())
 
+    def forget_pending_unit(self, unit_id: str) -> Optional[PendingPairUnit]:
+        """Remove a pending unit from in-memory tracking after completion or expiry."""
+        unit = self._pending_units.pop(unit_id, None)
+        if unit is None:
+            return None
+        market_units = self._market_units.get(unit.first_leg.market_slug, [])
+        self._market_units[unit.first_leg.market_slug] = [
+            existing_id for existing_id in market_units if existing_id != unit_id
+        ]
+        if not self._market_units[unit.first_leg.market_slug]:
+            self._market_units.pop(unit.first_leg.market_slug, None)
+        return unit
+
     def on_market_open(self, market_slug: str, family: str, open_timestamp: float) -> None:
         """Register a market open timestamp so scanner candidates can be window-checked."""
         self._market_open_times[market_slug] = open_timestamp

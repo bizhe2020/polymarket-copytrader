@@ -117,10 +117,9 @@ class PairPendingEntry:
     first_leg_asset: str
     first_leg_price: float
     first_leg_book_source: str
-    opposite_leg_price_limit: float
     opened_at_seconds: int
-    expires_at_seconds: int
     resolution_timestamp_seconds: Optional[int] = None
+    unit_id: str = ""
     strategy_reason: str = ""
 
 
@@ -353,6 +352,7 @@ class PairLivePaperApp:
         self._event_market_cache: Dict[str, List[PairMarketDescriptor]] = {}
         self._observed_pair_contexts: Dict[str, _ObservedPairContext] = {}
         self._initialize_session()
+        self._rehydrate_pending_entries()
         self.events.write(
             "pair_strategy_bundle_loaded",
             {
@@ -379,6 +379,7 @@ class PairLivePaperApp:
             f"durations={','.join(self.config.scanner.durations)}",
             f"skeleton_config_path={self.config.scanner.skeleton_config_path or 'default'}",
             f"active_strategy_families={','.join(self.rule_engine.families_configured())}",
+            f"pending_units={self.rule_engine.pending_unit_count()}",
             f"observe_target_activity={self.config.scanner.observe_target_activity}",
             f"market_trigger_enabled={self.config.scanner.market_trigger_enabled}",
             f"min_seconds_to_resolution={self.config.scanner.min_seconds_to_resolution}",
@@ -702,6 +703,62 @@ class PairLivePaperApp:
         effective_min = max(min_candidates) if min_candidates else None
         return effective_min, scanner_max
 
+    def _rehydrate_pending_entries(self) -> None:
+        for market_key, pending_entry in list(self.state.pending_entries.items()):
+            if not pending_entry.market_slug:
+                self.state.pending_entries.pop(market_key, None)
+                continue
+            open_timestamp = _infer_market_open_timestamp_seconds(
+                pending_entry.resolution_timestamp_seconds,
+                pending_entry.market_duration_bucket,
+            )
+            if open_timestamp is None:
+                open_timestamp = int(pending_entry.opened_at_seconds)
+            self.rule_engine.on_market_open(
+                pending_entry.market_slug,
+                pending_entry.market_family,
+                float(open_timestamp),
+            )
+            decision = self.rule_engine.open_market_candidate(
+                market_slug=pending_entry.market_slug,
+                family=pending_entry.market_family,
+                candidate_price=float(pending_entry.first_leg_price),
+                candidate_usdc_size=float(self.config.scanner.pair_stake_usdc),
+                current_time=float(pending_entry.opened_at_seconds),
+            )
+            if decision.action != "enter_first_leg" or decision.unit_id is None:
+                self.events.write(
+                    "pending_entry_rehydrate_skip",
+                    {
+                        "market_slug": pending_entry.market_slug,
+                        "reason": decision.reason,
+                    },
+                )
+                self.state.pending_entries.pop(market_key, None)
+                continue
+            pending_entry.unit_id = decision.unit_id
+
+    def _tick_pending_entry(
+        self,
+        pending_entry: PairPendingEntry,
+        *,
+        trigger_mode: str,
+        reference_payload: Dict[str, object],
+        now_seconds: int,
+    ) -> bool:
+        decisions = self.rule_engine.tick(pending_entry.market_slug, float(now_seconds))
+        for decision in decisions:
+            if decision.unit_id != pending_entry.unit_id or decision.action != "timeout":
+                continue
+            self._expire_pending_entry(
+                pending_entry,
+                trigger_mode=trigger_mode,
+                reference_payload=reference_payload,
+                strategy_reason=decision.reason,
+            )
+            return True
+        return False
+
     def _evaluate_pair_descriptor(
         self,
         *,
@@ -788,12 +845,13 @@ class PairLivePaperApp:
         up_book, up_source = self._order_book_for_asset(descriptor.up_asset)
         down_book, down_source = self._order_book_for_asset(descriptor.down_asset)
         if up_book is None or down_book is None:
-            if pending_entry is not None and now_seconds >= pending_entry.expires_at_seconds:
-                self._expire_pending_entry(
-                    pending_entry,
-                    trigger_mode=trigger_mode,
-                    reference_payload=reference_payload,
-                )
+            if pending_entry is not None and self._tick_pending_entry(
+                pending_entry,
+                trigger_mode=trigger_mode,
+                reference_payload=reference_payload,
+                now_seconds=now_seconds,
+            ):
+                return
             payload = dict(reference_payload)
             payload.update(
                 {
@@ -814,12 +872,13 @@ class PairLivePaperApp:
         up_ask = up_book.best_ask
         down_ask = down_book.best_ask
         if up_ask is None or down_ask is None:
-            if pending_entry is not None and now_seconds >= pending_entry.expires_at_seconds:
-                self._expire_pending_entry(
-                    pending_entry,
-                    trigger_mode=trigger_mode,
-                    reference_payload=reference_payload,
-                )
+            if pending_entry is not None and self._tick_pending_entry(
+                pending_entry,
+                trigger_mode=trigger_mode,
+                reference_payload=reference_payload,
+                now_seconds=now_seconds,
+            ):
+                return
             payload = dict(reference_payload)
             payload.update(
                 {
@@ -923,7 +982,7 @@ class PairLivePaperApp:
             self.events.write("pair_scanner_decision", payload)
             return
 
-        entry_decision = self.rule_engine.evaluate_market_candidate(
+        entry_decision = self.rule_engine.open_market_candidate(
             market_slug=descriptor.market_slug,
             family=market_family,
             candidate_price=float(candidate.ask_price),
@@ -1104,7 +1163,7 @@ class PairLivePaperApp:
             self.events.write("pair_scanner_decision", payload)
             return
 
-        entry_decision = self.rule_engine.evaluate_market_candidate(
+        entry_decision = self.rule_engine.open_market_candidate(
             market_slug=descriptor.market_slug,
             family=market_family,
             candidate_price=float(candidate.ask_price),
@@ -1130,29 +1189,6 @@ class PairLivePaperApp:
             self.events.write("pair_scanner_decision", payload)
             return
 
-        opposite_limit = compute_opposite_leg_price_limit(
-            first_leg_price=candidate.ask_price,
-            fee_bps=self.config.scanner.fee_bps,
-            slippage_bps=self.config.scanner.slippage_bps,
-            max_effective_pair_sum=self.config.scanner.max_effective_pair_sum,
-        )
-        if opposite_limit <= 0:
-            payload = dict(reference_payload)
-            payload.update(
-                {
-                    "reason": "skip_first_leg_no_opposite_room",
-                    "trigger_mode": trigger_mode,
-                    "market_slug": descriptor.market_slug,
-                    "event_slug": event_slug,
-                    "market_family": market_family,
-                    "market_duration_bucket": market_duration_bucket,
-                    "seconds_to_resolution": seconds_to_resolution,
-                    "first_leg_outcome": candidate.outcome,
-                    "first_leg_price": round(candidate.ask_price, 6),
-                }
-            )
-            self.events.write("pair_scanner_decision", payload)
-            return
         market_key = descriptor.market_slug or descriptor.condition_id
         self.state.pending_entries[market_key] = PairPendingEntry(
             market_slug=descriptor.market_slug,
@@ -1166,11 +1202,10 @@ class PairLivePaperApp:
             down_outcome=descriptor.down_outcome,
             first_leg_outcome=candidate.outcome,
             first_leg_asset=candidate.asset,
+            unit_id=str(entry_decision.unit_id or ""),
             first_leg_price=round(candidate.ask_price, 6),
             first_leg_book_source=candidate.book_source,
-            opposite_leg_price_limit=round(opposite_limit, 6),
             opened_at_seconds=now_seconds,
-            expires_at_seconds=now_seconds + int(family_cfg.second_leg.timeout_seconds),
             resolution_timestamp_seconds=descriptor.resolution_timestamp_seconds,
             strategy_reason=entry_decision.reason,
         )
@@ -1186,8 +1221,7 @@ class PairLivePaperApp:
                 "seconds_to_resolution": seconds_to_resolution,
                 "first_leg_outcome": candidate.outcome,
                 "first_leg_price": round(candidate.ask_price, 6),
-                "opposite_leg_price_limit": round(opposite_limit, 6),
-                "expires_at_seconds": now_seconds + int(family_cfg.second_leg.timeout_seconds),
+                "unit_id": entry_decision.unit_id,
                 "strategy_reason": entry_decision.reason,
                 "strategy_details": entry_decision.details,
             }
@@ -1211,21 +1245,27 @@ class PairLivePaperApp:
         seconds_to_resolution: Optional[int],
         now_seconds: int,
     ) -> None:
-        if now_seconds >= pending_entry.expires_at_seconds:
+        opposite_ask = down_ask if pending_entry.first_leg_outcome == pending_entry.up_outcome else up_ask
+        decision = self.rule_engine.evaluate_second_leg_completion(
+            unit_id=pending_entry.unit_id,
+            market_slug=descriptor.market_slug,
+            current_price=float(opposite_ask),
+            current_time=float(now_seconds),
+        )
+        if decision.action == "timeout":
             self._expire_pending_entry(
                 pending_entry,
                 trigger_mode=trigger_mode,
                 reference_payload=reference_payload,
+                strategy_reason=decision.reason,
             )
             return
-        plan_up_ask = pending_entry.first_leg_price if pending_entry.first_leg_outcome == pending_entry.up_outcome else up_ask
-        plan_down_ask = pending_entry.first_leg_price if pending_entry.first_leg_outcome == pending_entry.down_outcome else down_ask
-        opposite_ask = down_ask if pending_entry.first_leg_outcome == pending_entry.up_outcome else up_ask
-        if opposite_ask > pending_entry.opposite_leg_price_limit:
+
+        if decision.action != "complete_second_leg":
             payload = dict(reference_payload)
             payload.update(
                 {
-                    "reason": "skip_opposite_leg_too_expensive",
+                    "reason": decision.reason,
                     "trigger_mode": trigger_mode,
                     "market_slug": descriptor.market_slug,
                     "event_slug": event_slug,
@@ -1234,12 +1274,15 @@ class PairLivePaperApp:
                     "seconds_to_resolution": seconds_to_resolution,
                     "first_leg_outcome": pending_entry.first_leg_outcome,
                     "first_leg_price": round(pending_entry.first_leg_price, 6),
-                    "opposite_leg_price_limit": round(pending_entry.opposite_leg_price_limit, 6),
-                    "current_opposite_ask": round(opposite_ask, 6),
+                    "current_opposite_price": round(opposite_ask, 6),
+                    "strategy_details": decision.details,
                 }
             )
             self.events.write("pair_scanner_decision", payload)
             return
+
+        plan_up_ask = pending_entry.first_leg_price if pending_entry.first_leg_outcome == pending_entry.up_outcome else up_ask
+        plan_down_ask = pending_entry.first_leg_price if pending_entry.first_leg_outcome == pending_entry.down_outcome else down_ask
         plan = compute_pair_execution_plan(
             up_ask=plan_up_ask,
             down_ask=plan_down_ask,
@@ -1249,12 +1292,11 @@ class PairLivePaperApp:
             max_effective_pair_sum=self.config.scanner.max_effective_pair_sum,
         )
         if plan is None:
-            payload = dict(reference_payload)
-            payload.update(
-                {
-                    "reason": "skip_pair_sum_too_high_after_pending",
-                    "trigger_mode": trigger_mode,
-                    "market_slug": descriptor.market_slug,
+            self._expire_pending_entry(
+                pending_entry,
+                trigger_mode=trigger_mode,
+                reference_payload={
+                    **reference_payload,
                     "event_slug": event_slug,
                     "market_family": market_family,
                     "market_duration_bucket": market_duration_bucket,
@@ -1263,17 +1305,21 @@ class PairLivePaperApp:
                     "first_leg_price": round(pending_entry.first_leg_price, 6),
                     "current_up_ask": round(up_ask, 6),
                     "current_down_ask": round(down_ask, 6),
-                }
+                },
+                strategy_reason="strategy_accept_but_pair_sum_too_high",
             )
-            self.events.write("pair_scanner_decision", payload)
             return
         if self.state.cash_usdc < self.config.scanner.pair_stake_usdc:
-            payload = dict(reference_payload)
-            payload.update({"reason": "skip_no_cash", "trigger_mode": trigger_mode})
-            self.events.write("pair_scanner_decision", payload)
+            self._expire_pending_entry(
+                pending_entry,
+                trigger_mode=trigger_mode,
+                reference_payload=reference_payload,
+                strategy_reason="strategy_accept_but_no_cash",
+            )
             return
         market_key = descriptor.market_slug or descriptor.condition_id
         self.state.pending_entries.pop(market_key, None)
+        self.rule_engine.forget_pending_unit(pending_entry.unit_id)
         self._open_pair_position(
             descriptor=descriptor,
             plan=plan,
@@ -1295,13 +1341,16 @@ class PairLivePaperApp:
         *,
         trigger_mode: str,
         reference_payload: Dict[str, object],
+        strategy_reason: Optional[str] = None,
     ) -> None:
         market_key = pending_entry.market_slug or pending_entry.condition_id
         self.state.pending_entries.pop(market_key, None)
+        if pending_entry.unit_id:
+            self.rule_engine.forget_pending_unit(pending_entry.unit_id)
         payload = dict(reference_payload)
         payload.update(
             {
-                "reason": "pending_first_leg_expired",
+                "reason": strategy_reason or "pending_first_leg_expired",
                 "trigger_mode": trigger_mode,
                 "market_slug": pending_entry.market_slug,
                 "event_slug": pending_entry.event_slug,
@@ -1310,7 +1359,8 @@ class PairLivePaperApp:
                 "first_leg_outcome": pending_entry.first_leg_outcome,
                 "first_leg_price": round(pending_entry.first_leg_price, 6),
                 "opened_at_seconds": pending_entry.opened_at_seconds,
-                "expires_at_seconds": pending_entry.expires_at_seconds,
+                "unit_id": pending_entry.unit_id,
+                "strategy_reason": pending_entry.strategy_reason,
             }
         )
         self.events.write("pair_scanner_decision", payload)
