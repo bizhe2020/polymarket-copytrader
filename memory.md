@@ -154,51 +154,41 @@
 - `polymarket_copytrader/strategy_rollout_bundle_v0.py`
 - `polymarket_copytrader/strategy_config_skeleton_v0.py`
 - `polymarket_copytrader/config/skeleton_assembler.py`       ← skeleton loader/validator
-- `polymarket_copytrader/pair_unit_strategy.py`              ← runtime state machine runner
-- `polymarket_copytrader/follower.py` ← pure copytrader (pair-unit removed in clean-up)
-- `polymarket_copytrader/pair_live_paper.py` ← **Plan B 主入口**（独立 market scanner + skeleton）
-- `polymarket_copytrader/pair_unit_strategy.py` ← family-specific decision engine（scanner-facing API）
-- `polymarket_copytrader/models.py` ← StateSnapshot（pair-unit 字段已移除）
+- `polymarket_copytrader/pair_unit_strategy.py`              ← scanner-facing family rule engine
+- `polymarket_copytrader/pair_live_paper.py`                 ← Plan B runtime / independent first-leg scanner
+- `polymarket_copytrader/follower.py`                         ← legacy copytrader path
 - `polymarket_copytrader/cli.py`
 
-## Architecture — Post Clean-Up
+## Most Recent Mainline State
 
-### 执行路径（两条，不混淆）
+### Phase S completed: skeleton + scanner-facing runtime split
 
-| 路径 | 入口 | 触发 | 角色 |
-|------|------|------|------|
-| Legacy copytrader | `follower.py` | 目标钱包交易 | 纯跟单，`CopyTraderApp` |
-| **Plan B（主）** | `pair_live_paper.py` | 市场开盘独立触发 | skeleton 驱动 |
+- `strategy_config_skeleton_v0.json` — per-family entry/second-leg/override config
+- `skeleton_assembler.py` — validates and normalizes skeleton JSON → bundle dict
+- `pair_unit_strategy.py` — scanner-facing family rule engine:
+  - `evaluate_market_candidate`
+  - `open_market_candidate`
+  - `evaluate_second_leg_completion`
+  - `tick`
+  - `on_market_open`
+- `pair_live_paper.py` — Plan B runtime that loads `strategy_config_skeleton_v0` directly
+- `follower.py` — reverted to legacy copytrader responsibility; no pair-unit mainline integration
 
-### 已确认矛盾已解决
+### Plan B mainline
 
-- `follower.py` 已移除所有 pair-unit 接入：`_pair_unit_strategy`、`_pair_unit_enabled`、`_evaluate_pending_pair_units`、`_pair_unit_decision_to_follow_decision`、`_resolve_asset_id_for_market`
-- `models.py` 已移除 `StateSnapshot.asset_pair_units_open`
-- `store.py` 已移除 `asset_pair_units_open` 序列化
-- `CopyTraderApp` 现在是纯 copytrader，不再混入 Plan B
+1. **Runtime entrypoint**
+   - Main recommended runtime is `pair-live-paper`
+   - `cli.py` should treat `pair-live-paper` as the Plan B entrypoint
 
-### Plan B 架构（下一步接入）
+2. **First-leg trigger**
+   - Independent market scanner
+   - Family-specific open window + price band from skeleton
+   - `min_seconds_to_resolution = 300s` remains a hard family gate
+   - Optional scanner-level resolution window (for opening-hourly experiments) is additive on top of family rules
 
-```
-strategy_config_skeleton_v0.json
-    → skeleton_assembler.py  (load_skeleton)
-    → pair_live_paper.py  (独立 scanner + runtime orchestration)
-    → pair_unit_strategy.py  (family-specific decision engine, scanner-facing API)
-```
-
-### 已实现（Skeleton 层）
-
-- `entry_ruleset_v1.py` — family-specific entry ruleset（含 `min_seconds_to_resolution=300s`）
-- `strategy_blueprint_v0.py` / `btc/eth_sol strategy` — skeleton 配置生成
-- `strategy_config_skeleton_v0.py` — 配置汇总
-- `config/skeleton_assembler.py` — 验证 + 标准化
-- `pair_unit_strategy.py` — `evaluate_first_leg_entry`、`evaluate_second_leg_completion`、`on_market_open`
-- `test_pair_unit_entry_resolution_gate.py` — 4 个测试全绿
-
-### 待接入（Scanner 层）
-
-- `pair_live_paper.py` 还未接入 `strategy_config_skeleton_v0`（当前用通用 scanner 参数）
-- `detect_regime()` 仍是 elapsed-time 占位，需要真实外部市场信号
+3. **Legacy path**
+   - `CopyTraderApp` / `follower.py` stays available for mirror-copy behavior
+   - It is no longer the strategy incubation mainline
 
 ## Notes For Continuation
 
@@ -208,9 +198,7 @@ strategy_config_skeleton_v0.json
   - tracker doc: progress only
   - results doc: solid conclusions only
 - Next recommended mainline actions (in order):
-  1. **接入 skeleton**：让 `pair_live_paper.py` 直接消费 `strategy_config_skeleton_v0`（替换通用 scanner 参数）
-  2. **改造 `pair_unit_strategy.py`**：去掉"目标交易驱动"语义，明确为 scanner-facing API
-  3. **CLI 更新**：主入口改为 `pair-live-paper`，不再推荐 `CopyTraderApp` 作为 Plan B 入口
-  4. **Live paper Plan B 验证**：跑 `pair-live-paper skeleton-driven` 验证 BTC first-leg entry
-  5. **Regime hardening**：`detect_regime()` 替换为真实外部市场信号
-
+  1. **Plan B live paper run**: run `pair-live-paper` in paper mode and verify BTC hourly first-leg entries trigger from scanner conditions, not target trades
+  2. **Second-leg alignment**: finish replacing `pair_live_paper.py` pending-entry completion heuristics with the same acceptance-band logic used by `pair_unit_strategy.py`
+  3. **Integration tests**: add Plan B integration tests for skeleton-driven first-leg gating and scanner-only trigger mode
+  4. **Regime detection hardening**: `detect_regime()` in `pair_unit_strategy.py` currently uses a simple elapsed-time heuristic — replace with real external market signal when available

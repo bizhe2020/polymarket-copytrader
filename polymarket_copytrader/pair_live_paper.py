@@ -271,17 +271,6 @@ def compute_pair_execution_plan(
     )
 
 
-def compute_opposite_leg_price_limit(
-    *,
-    first_leg_price: float,
-    fee_bps: float,
-    slippage_bps: float,
-    max_effective_pair_sum: float,
-) -> float:
-    total_cost_rate = (float(fee_bps) + float(slippage_bps)) / 10000.0
-    return (float(max_effective_pair_sum) / (1.0 + total_cost_rate)) - float(first_leg_price)
-
-
 def compute_rebalanced_effective_pair_sum(
     *,
     current_cost_usdc: float,

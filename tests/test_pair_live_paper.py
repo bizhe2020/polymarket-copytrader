@@ -4,7 +4,6 @@ from polymarket_copytrader.api import extract_market_tokens_with_outcomes
 from polymarket_copytrader.pair_live_paper import (
     _market_duration_bucket_from_text,
     _market_family_from_text,
-    compute_opposite_leg_price_limit,
     compute_pair_execution_plan,
     compute_rebalanced_effective_pair_sum,
     select_first_leg_candidate,
@@ -58,15 +57,6 @@ class PairLivePaperTests(unittest.TestCase):
             _market_duration_bucket_from_text("Bitcoin Up or Down - March 25, 3PM ET"),
             "hourly",
         )
-
-    def test_compute_opposite_leg_price_limit(self) -> None:
-        limit = compute_opposite_leg_price_limit(
-            first_leg_price=0.47,
-            fee_bps=10.0,
-            slippage_bps=50.0,
-            max_effective_pair_sum=0.995,
-        )
-        self.assertAlmostEqual(limit, 0.519066, places=5)
 
     def test_select_first_leg_candidate_prefers_requested_outcome(self) -> None:
         candidate = select_first_leg_candidate(
