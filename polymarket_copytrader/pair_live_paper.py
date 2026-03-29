@@ -495,12 +495,30 @@ class PairLivePaperApp:
             if descriptors is None:
                 descriptors = self._load_event_market_descriptors(event_slug)
                 self._event_market_cache[event_slug] = descriptors
+                if descriptors:
+                    self.events.write(
+                        "pair_event_descriptors_loaded",
+                        {"event_slug": event_slug, "count": len(descriptors)},
+                    )
+                else:
+                    self.events.write(
+                        "pair_event_descriptors_empty",
+                        {"event_slug": event_slug},
+                    )
             for descriptor in descriptors:
                 market_family = _market_family_from_text(descriptor.market_slug)
                 market_duration_bucket = _market_duration_bucket_from_text(descriptor.market_slug)
                 if market_family not in set(self.config.scanner.families):
+                    self.events.write(
+                        "pair_descriptor_filtered_family",
+                        {"market_slug": descriptor.market_slug, "family": market_family},
+                    )
                     continue
                 if market_duration_bucket not in set(self.config.scanner.durations):
+                    self.events.write(
+                        "pair_descriptor_filtered_duration",
+                        {"market_slug": descriptor.market_slug, "bucket": market_duration_bucket},
+                    )
                     continue
                 market_key = descriptor.market_slug or descriptor.condition_id
                 if (
